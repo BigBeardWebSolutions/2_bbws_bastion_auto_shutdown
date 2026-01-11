@@ -1,0 +1,433 @@
+name: Deploy Lambda Auto-Shutdown - PROD
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'plan'
+        type: choice
+        options:
+          - 'plan'
+          - 'apply'
+          - 'destroy'
+
+env:
+  TF_VERSION: '1.5.0'
+  PYTHON_VERSION: '3.11'
+  ENVIRONMENT: 'prod'
+  AWS_REGION: 'af-south-1'
+  AWS_ACCOUNT_ID: '093646564004'
+
+jobs:
+  # ============================================
+  # Test Lambda Function
+  # ============================================
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-mock
+
+      - name: Run tests
+        run: |
+          pytest tests/ \
+            --cov=src \
+            --cov-report=term-missing \
+            --cov-report=xml \
+            --verbose
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+  # ============================================
+  # Build Lambda Package
+  # ============================================
+  build:
+    name: Build Lambda Package
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Create deployment package
+        run: |
+          mkdir -p package
+          pip install -r requirements.txt -t package/
+          cp -r src/* package/
+          cd package
+          zip -r ../lambda-deployment.zip .
+          cd ..
+          echo "Package size: $(du -h lambda-deployment.zip)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-package-prod
+          path: lambda-deployment.zip
+          retention-days: 7
+
+  # ============================================
+  # Validate Prerequisites
+  # ============================================
+  validate:
+    name: Validate Prerequisites
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Validate-Lambda-PROD-${{ github.run_id }}
+
+      - name: Verify AWS Account
+        run: |
+          CURRENT_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          if [ "$CURRENT_ACCOUNT" != "${{ env.AWS_ACCOUNT_ID }}" ]; then
+            echo "❌ ERROR: Wrong AWS account! Expected ${{ env.AWS_ACCOUNT_ID }}, got $CURRENT_ACCOUNT"
+            exit 1
+          fi
+          echo "✅ Connected to correct AWS account: $CURRENT_ACCOUNT (PROD)"
+
+      - name: Check Backend Resources
+        run: |
+          echo "Checking S3 backend bucket..."
+          if ! aws s3 ls s3://bbws-lambda-terraform-state-prod 2>/dev/null; then
+            echo "⚠️ WARNING: S3 backend bucket does not exist, creating..."
+            aws s3 mb s3://bbws-lambda-terraform-state-prod --region af-south-1
+            aws s3api put-bucket-versioning \
+              --bucket bbws-lambda-terraform-state-prod \
+              --versioning-configuration Status=Enabled
+            echo "✅ S3 bucket created with versioning"
+          else
+            echo "✅ S3 bucket exists"
+          fi
+
+      - name: Check Bastion Instance
+        run: |
+          echo "Checking if bastion exists (Lambda target)..."
+          BASTION_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=prod-wordpress-migration-bastion" \
+            --query 'Reservations[0].Instances[0].InstanceId' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -z "$BASTION_ID" ] || [ "$BASTION_ID" == "None" ]; then
+            echo "⚠️ WARNING: Bastion instance not found"
+            echo "Deploy bastion first: Run 'Deploy Bastion Infrastructure - PROD' workflow"
+          else
+            echo "✅ Bastion instance found: $BASTION_ID"
+          fi
+
+  # ============================================
+  # Terraform Plan
+  # ============================================
+  terraform-plan:
+    name: Terraform Plan (PROD)
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: terraform
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Plan-Lambda-PROD-${{ github.run_id }}
+
+      - name: Download Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-package-prod
+          path: terraform/
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=bbws-lambda-terraform-state-prod" \
+            -backend-config="key=bastion-auto-shutdown/terraform.tfstate" \
+            -backend-config="region=af-south-1" \
+            -input=false
+
+          terraform workspace select prod || terraform workspace new prod
+          echo "📍 Workspace: $(terraform workspace show)"
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan \
+            -var="environment=prod" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="lambda_package_path=lambda-deployment.zip" \
+            -no-color \
+            -out=tfplan \
+            -detailed-exitcode
+
+          TF_EXIT=$?
+          echo "exitcode=$TF_EXIT" >> $GITHUB_OUTPUT
+
+          terraform show -no-color tfplan > plan.txt
+          exit $TF_EXIT
+
+      - name: Upload Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-lambda-prod
+          path: terraform/tfplan
+          retention-days: 7
+
+      - name: Upload Plan Text
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-text-lambda-prod
+          path: terraform/plan.txt
+          retention-days: 7
+
+      - name: Create Plan Summary
+        run: |
+          echo "## Terraform Plan - Lambda Auto-Shutdown (PROD) ⏰" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Account**: ${{ env.AWS_ACCOUNT_ID }} (PROD)" >> $GITHUB_STEP_SUMMARY
+          echo "**Region**: ${{ env.AWS_REGION }} (Africa - Cape Town)" >> $GITHUB_STEP_SUMMARY
+          echo "**Action**: ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.plan.outputs.exitcode }}" == "0" ]; then
+            echo "✅ **No changes detected**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.plan.outputs.exitcode }}" == "2" ]; then
+            echo "⚠️ **Changes detected** - Review plan before applying" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Resources:" >> $GITHUB_STEP_SUMMARY
+            echo "- Lambda function (Python 3.11)" >> $GITHUB_STEP_SUMMARY
+            echo "- IAM role and policies" >> $GITHUB_STEP_SUMMARY
+            echo "- EventBridge rule (every 5 minutes)" >> $GITHUB_STEP_SUMMARY
+            echo "- DynamoDB table (session tracking)" >> $GITHUB_STEP_SUMMARY
+            echo "- SNS topic (notifications)" >> $GITHUB_STEP_SUMMARY
+            echo "- CloudWatch log group" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "<details><summary>Plan Output</summary>" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            head -150 plan.txt >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "</details>" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ============================================
+  # Terraform Apply
+  # ============================================
+  terraform-apply:
+    name: Terraform Apply (PROD)
+    needs: [validate, terraform-plan]
+    if: github.event.inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: prod-lambda-auto-shutdown
+      url: https://console.aws.amazon.com/lambda/home?region=af-south-1#/functions/prod-bastion-auto-shutdown
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Apply-Lambda-PROD-${{ github.run_id }}
+
+      - name: Download Lambda package
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-package-prod
+          path: terraform/
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=bbws-lambda-terraform-state-prod" \
+            -backend-config="key=bastion-auto-shutdown/terraform.tfstate" \
+            -backend-config="region=af-south-1" \
+            -input=false
+
+          terraform workspace select prod
+
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-lambda-prod
+          path: terraform/
+
+      - name: Terraform Apply
+        run: |
+          echo "🚀 Deploying Lambda auto-shutdown to PROD (af-south-1)..."
+          terraform apply -auto-approve tfplan
+          echo "✅ Lambda deployed successfully"
+
+      - name: Get Outputs
+        id: outputs
+        run: |
+          echo "function_name=$(terraform output -raw lambda_function_name)" >> $GITHUB_OUTPUT
+          echo "function_arn=$(terraform output -raw lambda_function_arn)" >> $GITHUB_OUTPUT
+          echo "table_name=$(terraform output -raw dynamodb_table_name)" >> $GITHUB_OUTPUT
+          echo "sns_topic=$(terraform output -raw sns_topic_arn)" >> $GITHUB_OUTPUT
+
+      - name: Test Lambda Invocation
+        run: |
+          echo "Testing Lambda function..."
+          aws lambda invoke \
+            --function-name ${{ steps.outputs.outputs.function_name }} \
+            --region ${{ env.AWS_REGION }} \
+            response.json
+
+          echo "Lambda response:"
+          cat response.json
+          echo ""
+
+      - name: Deployment Summary
+        run: |
+          echo "## ⏰ Lambda Auto-Shutdown Deployed to PROD!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Lambda Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Function**: ${{ steps.outputs.outputs.function_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ARN**: ${{ steps.outputs.outputs.function_arn }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Runtime**: Python 3.11" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger**: EventBridge (every 5 minutes)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: af-south-1 (Africa - Cape Town)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### DynamoDB" >> $GITHUB_STEP_SUMMARY
+          echo "- **Table**: ${{ steps.outputs.outputs.table_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### SNS" >> $GITHUB_STEP_SUMMARY
+          echo "- **Topic**: ${{ steps.outputs.outputs.sns_topic }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Auto-Shutdown Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- ⏱️ **Idle Timeout**: 30 minutes" >> $GITHUB_STEP_SUMMARY
+          echo "- 📊 **CPU Threshold**: < 5%" >> $GITHUB_STEP_SUMMARY
+          echo "- 🌐 **Network Threshold**: < 1MB" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 **Check Interval**: 5 minutes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. ✅ Lambda deployed and active" >> $GITHUB_STEP_SUMMARY
+          echo "2. 📧 Subscribe to SNS topic for notifications" >> $GITHUB_STEP_SUMMARY
+          echo "3. 🧪 Test with bastion host" >> $GITHUB_STEP_SUMMARY
+
+  # ============================================
+  # Terraform Destroy
+  # ============================================
+  terraform-destroy:
+    name: Terraform Destroy (PROD)
+    if: github.event.inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    environment:
+      name: destroy-lambda-prod
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-Destroy-Lambda-PROD-${{ github.run_id }}
+
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="bucket=bbws-lambda-terraform-state-prod" \
+            -backend-config="key=bastion-auto-shutdown/terraform.tfstate" \
+            -backend-config="region=af-south-1" \
+            -input=false
+          terraform workspace select prod
+
+      - name: Terraform Destroy
+        run: |
+          echo "⚠️ DESTROYING LAMBDA AUTO-SHUTDOWN IN PROD..."
+          terraform destroy \
+            -var="environment=prod" \
+            -var="aws_region=${{ env.AWS_REGION }}" \
+            -var="lambda_package_path=lambda-deployment.zip" \
+            -auto-approve
+          echo "✅ Lambda infrastructure destroyed"
+
+      - name: Destroy Summary
+        run: |
+          echo "## ⚠️ Lambda Auto-Shutdown Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "All Lambda resources removed from PROD." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note**: Bastion host is still running (destroy separately if needed)." >> $GITHUB_STEP_SUMMARY
