@@ -129,7 +129,8 @@ class TestBastionAutoShutdown:
              patch('src.handler.dynamodb_client', mock_dynamodb_client), \
              patch('src.handler.ssm_client', mock_ssm_client), \
              patch('src.handler.sns_client', mock_sns_client), \
-             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client), \
+             patch('src.handler.SNS_TOPIC_ARN', 'arn:aws:sns:eu-west-1:123456789012:test-topic'):
 
             from src.handler import lambda_handler
 
