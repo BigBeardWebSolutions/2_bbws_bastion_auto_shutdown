@@ -57,14 +57,32 @@ class TestBastionAutoShutdown:
     def mock_cloudwatch_client(self):
         """Mock CloudWatch client"""
         mock_client = Mock()
-        # Default: low CPU usage (idle)
-        mock_client.get_metric_statistics.return_value = {
-            'Datapoints': [
-                {'Average': 2.5, 'Timestamp': datetime.utcnow() - timedelta(minutes=5)},
-                {'Average': 1.8, 'Timestamp': datetime.utcnow() - timedelta(minutes=10)},
-                {'Average': 3.2, 'Timestamp': datetime.utcnow() - timedelta(minutes=15)}
-            ]
-        }
+
+        def get_metric_statistics_side_effect(**kwargs):
+            """Return appropriate mock data based on metric name"""
+            metric_name = kwargs.get('MetricName')
+
+            if metric_name == 'CPUUtilization':
+                # Default: low CPU usage (idle)
+                return {
+                    'Datapoints': [
+                        {'Average': 2.5, 'Timestamp': datetime.utcnow() - timedelta(minutes=5)},
+                        {'Average': 1.8, 'Timestamp': datetime.utcnow() - timedelta(minutes=10)},
+                        {'Average': 3.2, 'Timestamp': datetime.utcnow() - timedelta(minutes=15)}
+                    ]
+                }
+            elif metric_name in ['NetworkIn', 'NetworkOut']:
+                # Low network I/O (idle)
+                return {
+                    'Datapoints': [
+                        {'Sum': 1000.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=5)},
+                        {'Sum': 800.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=10)},
+                        {'Sum': 1200.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=15)}
+                    ]
+                }
+            return {'Datapoints': []}
+
+        mock_client.get_metric_statistics.side_effect = get_metric_statistics_side_effect
         return mock_client
 
     @pytest.fixture
@@ -269,13 +287,28 @@ class TestBastionAutoShutdown:
                                         mock_dynamodb_client, mock_ssm_client, mock_sns_client):
         """Test that bastion with high CPU usage is NOT stopped"""
         # Setup: high CPU usage
-        mock_cloudwatch_client.get_metric_statistics.return_value = {
-            'Datapoints': [
-                {'Average': 45.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=5)},
-                {'Average': 52.3, 'Timestamp': datetime.utcnow() - timedelta(minutes=10)},
-                {'Average': 38.7, 'Timestamp': datetime.utcnow() - timedelta(minutes=15)}
-            ]
-        }
+        def high_cpu_side_effect(**kwargs):
+            """Return high CPU and normal network metrics"""
+            metric_name = kwargs.get('MetricName')
+
+            if metric_name == 'CPUUtilization':
+                return {
+                    'Datapoints': [
+                        {'Average': 45.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=5)},
+                        {'Average': 52.3, 'Timestamp': datetime.utcnow() - timedelta(minutes=10)},
+                        {'Average': 38.7, 'Timestamp': datetime.utcnow() - timedelta(minutes=15)}
+                    ]
+                }
+            elif metric_name in ['NetworkIn', 'NetworkOut']:
+                return {
+                    'Datapoints': [
+                        {'Sum': 1000.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=5)},
+                        {'Sum': 800.0, 'Timestamp': datetime.utcnow() - timedelta(minutes=10)}
+                    ]
+                }
+            return {'Datapoints': []}
+
+        mock_cloudwatch_client.get_metric_statistics.side_effect = high_cpu_side_effect
 
         with patch('boto3.client') as mock_boto3:
             def client_factory(service_name, **kwargs):
