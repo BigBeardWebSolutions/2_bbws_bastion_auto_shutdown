@@ -44,6 +44,7 @@ jobs:
 
       - name: Run tests
         run: |
+          export PYTHONPATH="${PYTHONPATH}:${PWD}"
           pytest tests/ \
             --cov=src \
             --cov-report=term-missing \
