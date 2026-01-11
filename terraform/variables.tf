@@ -10,6 +10,12 @@ variable "aws_region" {
   type        = string
 }
 
+variable "lambda_package_path" {
+  description = "Path to the Lambda deployment package ZIP file"
+  type        = string
+  default     = "lambda-deployment.zip"
+}
+
 variable "idle_threshold_minutes" {
   description = "Idle timeout in minutes before auto-shutdown"
   type        = number

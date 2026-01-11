@@ -1,7 +1,14 @@
 # Lambda Function for Bastion Auto-Shutdown
 
-# Archive source code
+# Use pre-built Lambda package (built by GitHub Actions)
+# Fallback to local build if running locally
+locals {
+  lambda_package = fileexists("${path.module}/${var.lambda_package_path}") ? "${path.module}/${var.lambda_package_path}" : data.archive_file.lambda_zip[0].output_path
+}
+
+# Archive source code (only used for local development)
 data "archive_file" "lambda_zip" {
+  count       = fileexists("${path.module}/${var.lambda_package_path}") ? 0 : 1
   type        = "zip"
   source_dir  = "${path.module}/../src"
   output_path = "${path.module}/bastion_auto_shutdown.zip"
@@ -122,11 +129,11 @@ resource "aws_cloudwatch_log_group" "lambda_logs" {
 
 # Lambda Function
 resource "aws_lambda_function" "bastion_auto_shutdown" {
-  filename         = data.archive_file.lambda_zip.output_path
+  filename         = local.lambda_package
   function_name    = "${var.environment}-bastion-auto-shutdown"
   role            = aws_iam_role.lambda_role.arn
   handler         = "handler.lambda_handler"
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  source_code_hash = filebase64sha256(local.lambda_package)
   runtime         = "python3.11"
   timeout         = 60  # 1 minute timeout
   memory_size     = 256
