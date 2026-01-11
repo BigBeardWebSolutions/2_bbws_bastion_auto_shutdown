@@ -2,7 +2,7 @@
 
 resource "aws_dynamodb_table" "bastion_sessions" {
   name           = "${var.environment}-bastion-sessions"
-  billing_mode   = "ON_DEMAND"  # Pay per request
+  billing_mode   = "PAY_PER_REQUEST"  # On-demand pay per request
   hash_key       = "instance_id"
   stream_enabled = false
 
