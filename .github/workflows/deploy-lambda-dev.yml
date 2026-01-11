@@ -224,7 +224,10 @@ jobs:
             -detailed-exitcode
 
           TF_EXIT=$?
-          echo "exitcode=$TF_EXIT" >> $GITHUB_OUTPUT
+          echo "Terraform plan exit code: $TF_EXIT"
+          echo "exitcode=$TF_EXIT" >> "$GITHUB_OUTPUT"
+          echo "Output written to: $GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT" || echo "Could not read GITHUB_OUTPUT"
 
           # Only fail if actual error (exit code 1), not on changes detected (exit code 2)
           if [ $TF_EXIT -eq 1 ]; then
