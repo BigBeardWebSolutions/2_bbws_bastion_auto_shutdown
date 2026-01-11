@@ -245,6 +245,7 @@ jobs:
 
           echo "Terraform plan exit code: $TF_EXIT"
           echo "exitcode=$TF_EXIT" >> "$GITHUB_OUTPUT"
+          echo "$TF_EXIT" > plan_exitcode.txt
 
           # Show plan output
           cat plan_output.txt
@@ -261,7 +262,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-lambda-dev
-          path: terraform/tfplan
+          path: |
+            terraform/tfplan
+            terraform/plan_exitcode.txt
           retention-days: 7
 
       - name: Upload Plan Text
@@ -307,9 +310,7 @@ jobs:
   terraform-apply:
     name: Terraform Apply (DEV)
     needs: [validate, terraform-plan]
-    if: |
-      (github.event.inputs.action == 'apply' || github.event_name == 'push') &&
-      needs.terraform-plan.outputs.plan_exitcode == '2'
+    if: github.event.inputs.action == 'apply' || github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -337,13 +338,33 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: GitHubActions-Apply-Lambda-DEV-${{ github.run_id }}
 
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-lambda-dev
+          path: terraform/
+
+      - name: Check if changes exist
+        id: check_changes
+        run: |
+          EXITCODE=$(cat plan_exitcode.txt)
+          echo "Plan exit code: $EXITCODE"
+          if [ "$EXITCODE" != "2" ]; then
+            echo "No changes to apply (exitcode=$EXITCODE)"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+
       - name: Download Lambda package
+        if: steps.check_changes.outputs.has_changes == 'true'
         uses: actions/download-artifact@v4
         with:
           name: lambda-package-dev
           path: terraform/
 
       - name: Terraform Init
+        if: steps.check_changes.outputs.has_changes == 'true'
         run: |
           terraform init \
             -backend-config="bucket=bbws-lambda-terraform-state-dev" \
@@ -353,27 +374,24 @@ jobs:
 
           terraform workspace select dev
 
-      - name: Download Plan
-        uses: actions/download-artifact@v4
-        with:
-          name: terraform-plan-lambda-dev
-          path: terraform/
-
       - name: Terraform Apply
+        if: steps.check_changes.outputs.has_changes == 'true'
         run: |
           echo "🚀 Deploying Lambda auto-shutdown to DEV..."
           terraform apply -auto-approve tfplan
           echo "✅ Lambda deployed successfully"
 
       - name: Get Outputs
+        if: steps.check_changes.outputs.has_changes == 'true'
         id: outputs
         run: |
           echo "function_name=$(terraform output -raw lambda_function_name)" >> $GITHUB_OUTPUT
           echo "function_arn=$(terraform output -raw lambda_function_arn)" >> $GITHUB_OUTPUT
-          echo "table_name=$(terraform output -raw dynamodb_table_name)" >> $GITHUB_OUTPUT
+          echo "table_name=$(terraform output -raw bastion_sessions_table_name)" >> $GITHUB_OUTPUT
           echo "sns_topic=$(terraform output -raw sns_topic_arn)" >> $GITHUB_OUTPUT
 
       - name: Test Lambda Invocation
+        if: steps.check_changes.outputs.has_changes == 'true'
         run: |
           echo "Testing Lambda function..."
           aws lambda invoke \
