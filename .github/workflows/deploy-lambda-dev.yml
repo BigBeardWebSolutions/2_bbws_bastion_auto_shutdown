@@ -213,7 +213,6 @@ jobs:
 
       - name: Terraform Plan
         id: plan
-        continue-on-error: true
         run: |
           set +e
           terraform plan \
@@ -227,8 +226,13 @@ jobs:
           TF_EXIT=$?
           echo "exitcode=$TF_EXIT" >> $GITHUB_OUTPUT
 
+          # Only fail if actual error (exit code 1), not on changes detected (exit code 2)
+          if [ $TF_EXIT -eq 1 ]; then
+            echo "Terraform plan failed with errors"
+            exit 1
+          fi
+
           terraform show -no-color tfplan > plan.txt
-          exit $TF_EXIT
 
       - name: Upload Plan
         uses: actions/upload-artifact@v4
