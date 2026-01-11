@@ -214,28 +214,48 @@ jobs:
       - name: Terraform Plan
         id: plan
         run: |
-          set +e
           terraform plan \
             -var="environment=dev" \
             -var="aws_region=${{ env.AWS_REGION }}" \
             -var="lambda_package_path=lambda-deployment.zip" \
             -no-color \
             -out=tfplan \
-            -detailed-exitcode
+            -detailed-exitcode > plan_output.txt 2>&1 || true
 
           TF_EXIT=$?
+
+          # Check if plan has changes by looking at the output
+          if grep -q "Plan: .* to add, .* to change, .* to destroy" plan_output.txt; then
+            # Extract numbers and check if any are non-zero
+            CHANGES=$(grep "Plan: .* to add, .* to change, .* to destroy" plan_output.txt | \
+                      sed -E 's/Plan: ([0-9]+) to add, ([0-9]+) to change, ([0-9]+) to destroy.*/\1 \2 \3/')
+            ADD=$(echo $CHANGES | awk '{print $1}')
+            CHANGE=$(echo $CHANGES | awk '{print $2}')
+            DESTROY=$(echo $CHANGES | awk '{print $3}')
+            TOTAL=$((ADD + CHANGE + DESTROY))
+
+            if [ $TOTAL -gt 0 ]; then
+              echo "✓ Changes detected: $ADD to add, $CHANGE to change, $DESTROY to destroy"
+              TF_EXIT=2
+            else
+              echo "No changes needed"
+              TF_EXIT=0
+            fi
+          fi
+
           echo "Terraform plan exit code: $TF_EXIT"
           echo "exitcode=$TF_EXIT" >> "$GITHUB_OUTPUT"
 
-          # Only fail if actual error (exit code 1), not on changes detected (exit code 2)
+          # Show plan output
+          cat plan_output.txt
+
+          # Fail if actual error
           if [ $TF_EXIT -eq 1 ]; then
             echo "Terraform plan failed with errors"
             exit 1
           fi
 
           terraform show -no-color tfplan > plan.txt
-
-          echo "Plan exit code $TF_EXIT written to GITHUB_OUTPUT"
 
       - name: Upload Plan
         uses: actions/upload-artifact@v4
