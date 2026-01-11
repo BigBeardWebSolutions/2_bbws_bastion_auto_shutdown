@@ -141,7 +141,7 @@ resource "aws_lambda_function" "bastion_auto_shutdown" {
   environment {
     variables = {
       ENVIRONMENT              = var.environment
-      AWS_REGION              = var.aws_region
+      # AWS_REGION is automatically provided by Lambda runtime
       DYNAMODB_TABLE          = aws_dynamodb_table.bastion_sessions.name
       SNS_TOPIC_ARN           = aws_sns_topic.bastion_shutdown.arn
       IDLE_THRESHOLD_MINUTES  = var.idle_threshold_minutes
@@ -192,14 +192,7 @@ resource "aws_cloudwatch_event_rule" "bastion_check" {
   name                = "${var.environment}-bastion-auto-shutdown-check"
   description         = "Trigger bastion auto-shutdown Lambda every 5 minutes"
   schedule_expression = "rate(5 minutes)"
-
-  tags = merge(
-    var.tags,
-    {
-      Name        = "${var.environment}-bastion-auto-shutdown-check"
-      Environment = var.environment
-    }
-  )
+  # Note: Tags removed due to GitHub Actions role lacking events:ListTagsForResource permission
 }
 
 # EventBridge Target
