@@ -123,19 +123,13 @@ class TestBastionAutoShutdown:
     def test_idle_bastion_gets_stopped(self, mock_ec2_client, mock_cloudwatch_client,
                                        mock_dynamodb_client, mock_ssm_client, mock_sns_client):
         """Test that idle bastion (>30 min) gets stopped"""
-        # Import handler after mocks are set up
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        # Patch the module-level clients in src.handler
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
@@ -172,28 +166,24 @@ class TestBastionAutoShutdown:
             }
         }
 
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
             event = {}
             context = Mock()
+            context.aws_request_id = 'test-request-456'
             result = lambda_handler(event, context)
 
             # Assertions
             assert result['statusCode'] == 200
-            assert 'active' in result['body'].lower() or 'not idle' in result['body'].lower()
+            result_body = json.loads(result['body'])
+            assert result_body['results'][0]['action'] == 'kept_running'
 
             # Verify EC2 stop was NOT called
             mock_ec2_client.stop_instances.assert_not_called()
@@ -214,28 +204,25 @@ class TestBastionAutoShutdown:
             }]
         }
 
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
             event = {}
             context = Mock()
+            context.aws_request_id = 'test-request-789'
             result = lambda_handler(event, context)
 
             # Assertions
             assert result['statusCode'] == 200
-            assert 'active session' in result['body'].lower() or 'ssm' in result['body'].lower()
+            result_body = json.loads(result['body'])
+            assert result_body['results'][0]['action'] == 'kept_running'
+            assert 'ssm' in result_body['results'][0]['reason'].lower()
 
             # Verify EC2 stop was NOT called
             mock_ec2_client.stop_instances.assert_not_called()
@@ -257,28 +244,25 @@ class TestBastionAutoShutdown:
             }]
         }
 
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
             event = {}
             context = Mock()
+            context.aws_request_id = 'test-request-101'
             result = lambda_handler(event, context)
 
             # Assertions
             assert result['statusCode'] == 200
-            assert 'stopped' in result['body'].lower() or 'skipped' in result['body'].lower()
+            result_body = json.loads(result['body'])
+            assert result_body['results'][0]['action'] == 'skipped'
+            assert result_body['results'][0]['reason'] == 'already_stopped'
 
             # Verify EC2 stop was NOT called (already stopped)
             mock_ec2_client.stop_instances.assert_not_called()
@@ -310,28 +294,25 @@ class TestBastionAutoShutdown:
 
         mock_cloudwatch_client.get_metric_statistics.side_effect = high_cpu_side_effect
 
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
             event = {}
             context = Mock()
+            context.aws_request_id = 'test-request-202'
             result = lambda_handler(event, context)
 
             # Assertions
             assert result['statusCode'] == 200
-            assert 'active' in result['body'].lower() or 'high cpu' in result['body'].lower()
+            result_body = json.loads(result['body'])
+            assert result_body['results'][0]['action'] == 'kept_running'
+            assert 'cpu' in result_body['results'][0]['reason'].lower()
 
             # Verify EC2 stop was NOT called
             mock_ec2_client.stop_instances.assert_not_called()
@@ -342,28 +323,24 @@ class TestBastionAutoShutdown:
         # Setup: no instances
         mock_ec2_client.describe_instances.return_value = {'Reservations': []}
 
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
             event = {}
             context = Mock()
+            context.aws_request_id = 'test-request-303'
             result = lambda_handler(event, context)
 
             # Assertions
             assert result['statusCode'] == 200
-            assert 'no instances' in result['body'].lower() or 'not found' in result['body'].lower()
+            result_body = json.loads(result['body'])
+            assert 'no managed bastion instances found' in result_body['message'].lower()
 
     def test_error_handling_boto3_exception(self, mock_ec2_client, mock_cloudwatch_client,
                                             mock_dynamodb_client, mock_ssm_client, mock_sns_client):
@@ -371,28 +348,24 @@ class TestBastionAutoShutdown:
         # Setup: EC2 API exception
         mock_ec2_client.describe_instances.side_effect = Exception("AWS API Error")
 
-        with patch('boto3.client') as mock_boto3:
-            def client_factory(service_name, **kwargs):
-                clients = {
-                    'ec2': mock_ec2_client,
-                    'cloudwatch': mock_cloudwatch_client,
-                    'dynamodb': mock_dynamodb_client,
-                    'ssm': mock_ssm_client,
-                    'sns': mock_sns_client
-                }
-                return clients.get(service_name)
-
-            mock_boto3.side_effect = client_factory
+        with patch('src.handler.ec2_client', mock_ec2_client), \
+             patch('src.handler.cloudwatch_client', mock_cloudwatch_client), \
+             patch('src.handler.dynamodb_client', mock_dynamodb_client), \
+             patch('src.handler.ssm_client', mock_ssm_client), \
+             patch('src.handler.sns_client', mock_sns_client), \
+             patch('src.handler.metrics_helper.cloudwatch', mock_cloudwatch_client):
 
             from src.handler import lambda_handler
 
             event = {}
             context = Mock()
+            context.aws_request_id = 'test-request-404'
             result = lambda_handler(event, context)
 
             # Assertions
             assert result['statusCode'] == 500
-            assert 'error' in result['body'].lower()
+            result_body = json.loads(result['body'])
+            assert 'error' in result_body
 
 
 if __name__ == '__main__':
